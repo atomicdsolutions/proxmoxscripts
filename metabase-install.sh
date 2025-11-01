@@ -51,8 +51,94 @@ start
 build_container
 description
 
+msg_info "Installing dependencies"
+$STD apt update
+$STD apt install -y curl wget openjdk-17-jre-headless
+
+msg_info "Creating Metabase user"
+if ! id -u metabase >/dev/null 2>&1; then
+    $STD useradd -r -s /bin/false -d /opt/metabase -m metabase
+fi
+
+msg_info "Creating Metabase directory"
+$STD mkdir -p /opt/metabase/data
+$STD chown -R metabase:metabase /opt/metabase
+
+msg_info "Downloading latest Metabase"
+LATEST_VERSION=$(curl -s https://api.github.com/repos/metabase/metabase/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+if [[ -z "$LATEST_VERSION" ]]; then
+    LATEST_VERSION="latest"
+    DOWNLOAD_URL="https://downloads.metabase.com/${LATEST_VERSION}/metabase.jar"
+else
+    DOWNLOAD_URL="https://downloads.metabase.com/v${LATEST_VERSION}/metabase.jar"
+fi
+
+$STD wget -q -O /opt/metabase/metabase.jar "${DOWNLOAD_URL}"
+$STD chown metabase:metabase /opt/metabase/metabase.jar
+$STD chmod 755 /opt/metabase/metabase.jar
+
+msg_info "Creating systemd service"
+cat > /etc/systemd/system/metabase.service <<EOF
+[Unit]
+Description=Metabase Server
+Documentation=https://www.metabase.com/docs/latest/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=metabase
+Group=metabase
+WorkingDirectory=/opt/metabase
+ExecStart=/usr/bin/java -Xmx2g -jar /opt/metabase/metabase.jar
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=metabase
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/metabase/data
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+msg_info "Enabling and starting Metabase service"
+$STD systemctl daemon-reload
+$STD systemctl enable metabase
+$STD systemctl start metabase
+
+msg_info "Waiting for Metabase to start"
+sleep 5
+
+msg_info "Checking Metabase status"
+if systemctl is-active --quiet metabase; then
+    msg_ok "Metabase service is running"
+else
+    msg_warning "Metabase service may still be starting. Check logs with: journalctl -u metabase -f"
+fi
+
 msg_ok "Completed Successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
 echo -e "${INFO}${YW} Access it using the following URL:${CL}"
 echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:3000${CL}"
 echo -e "${INFO}${YW} Default credentials: Set up on first login${CL}"
+echo ""
+echo -e "${INFO}${YW} Management Commands:${CL}"
+echo -e "${TAB}${GATEWAY}${BGN}Status:${CL} systemctl status metabase"
+echo -e "${TAB}${GATEWAY}${BGN}Start:${CL} systemctl start metabase"
+echo -e "${TAB}${GATEWAY}${BGN}Stop:${CL} systemctl stop metabase"
+echo -e "${TAB}${GATEWAY}${BGN}Restart:${CL} systemctl restart metabase"
+echo -e "${TAB}${GATEWAY}${BGN}Logs:${CL} journalctl -u metabase -f"
+echo ""
+echo -e "${INFO}${YW} File Locations:${CL}"
+echo -e "${TAB}${GATEWAY}${BGN}JAR file:${CL} /opt/metabase/metabase.jar"
+echo -e "${TAB}${GATEWAY}${BGN}Data directory:${CL} /opt/metabase/data"
