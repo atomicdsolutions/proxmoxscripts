@@ -13,6 +13,8 @@ var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-12}"
 var_unprivileged="${var_unprivileged:-1}"
+# Prevent build_container from trying to download install script
+var_install=""
 
 header_info "$APP"
 variables
@@ -52,17 +54,13 @@ build_container
 description
 
 msg_info "Installing dependencies"
-$STD apt update
-$STD apt install -y curl wget openjdk-17-jre-headless
+$STD bash -c "apt update && apt install -y curl wget openjdk-17-jre-headless"
 
 msg_info "Creating Metabase user"
-if ! id -u metabase >/dev/null 2>&1; then
-    $STD useradd -r -s /bin/false -d /opt/metabase -m metabase
-fi
+$STD bash -c "if ! id -u metabase >/dev/null 2>&1; then useradd -r -s /bin/false -d /opt/metabase -m metabase; fi"
 
 msg_info "Creating Metabase directory"
-$STD mkdir -p /opt/metabase/data
-$STD chown -R metabase:metabase /opt/metabase
+$STD bash -c "mkdir -p /opt/metabase/data && chown -R metabase:metabase /opt/metabase"
 
 msg_info "Downloading latest Metabase"
 LATEST_VERSION=$(curl -s https://api.github.com/repos/metabase/metabase/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
@@ -73,12 +71,10 @@ else
     DOWNLOAD_URL="https://downloads.metabase.com/v${LATEST_VERSION}/metabase.jar"
 fi
 
-$STD wget -q -O /opt/metabase/metabase.jar "${DOWNLOAD_URL}"
-$STD chown metabase:metabase /opt/metabase/metabase.jar
-$STD chmod 755 /opt/metabase/metabase.jar
+$STD bash -c "wget -q -O /opt/metabase/metabase.jar '${DOWNLOAD_URL}' && chown metabase:metabase /opt/metabase/metabase.jar && chmod 755 /opt/metabase/metabase.jar"
 
 msg_info "Creating systemd service"
-cat > /etc/systemd/system/metabase.service <<EOF
+$STD bash -c 'cat > /etc/systemd/system/metabase.service <<EOF
 [Unit]
 Description=Metabase Server
 Documentation=https://www.metabase.com/docs/latest/
@@ -97,30 +93,25 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=metabase
 
-# Security settings
 NoNewPrivileges=true
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/metabase/data
-
-# Resource limits
 LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF'
 
 msg_info "Enabling and starting Metabase service"
-$STD systemctl daemon-reload
-$STD systemctl enable metabase
-$STD systemctl start metabase
+$STD bash -c "systemctl daemon-reload && systemctl enable metabase && systemctl start metabase"
 
 msg_info "Waiting for Metabase to start"
 sleep 5
 
 msg_info "Checking Metabase status"
-if systemctl is-active --quiet metabase; then
+if $STD bash -c "systemctl is-active --quiet metabase"; then
     msg_ok "Metabase service is running"
 else
     msg_warning "Metabase service may still be starting. Check logs with: journalctl -u metabase -f"
