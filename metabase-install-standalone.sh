@@ -105,13 +105,17 @@ update_metabase() {
     fi
 
     msg_info "Checking for Metabase updates..."
-    CURRENT_VERSION=$(exec_in_ct "java -jar /opt/metabase/metabase.jar version 2>/dev/null | head -n1 | grep -oP 'v\d+\.\d+\.\d+' | sed 's/v//' || echo 'unknown'")
+    CURRENT_VERSION=$(exec_in_ct "java -jar /opt/metabase/metabase.jar version 2>/dev/null | head -n1 | grep -oP 'v?\d+\.\d+\.\d+' || echo 'unknown'")
+    # Ensure version has 'v' prefix for consistency
+    if [[ "$CURRENT_VERSION" != "unknown" ]] && [[ ! "$CURRENT_VERSION" =~ ^v ]]; then
+        CURRENT_VERSION="v${CURRENT_VERSION}"
+    fi
     LATEST_VERSION=$(curl -s https://api.github.com/repos/metabase/metabase/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
 
     if [[ "$CURRENT_VERSION" != "$LATEST_VERSION" ]] && [[ "$LATEST_VERSION" != "" ]]; then
         msg_info "Updating Metabase from $CURRENT_VERSION to $LATEST_VERSION"
         exec_in_ct "systemctl stop metabase"
-        exec_in_ct "wget -q -O /opt/metabase/metabase.jar 'https://downloads.metabase.com/v${LATEST_VERSION}/metabase.jar'"
+        exec_in_ct "curl -L -o /opt/metabase/metabase.jar 'https://downloads.metabase.com/v${LATEST_VERSION}/metabase.jar'"
         exec_in_ct "chown metabase:metabase /opt/metabase/metabase.jar"
         exec_in_ct "systemctl start metabase"
         msg_ok "Updated to version $LATEST_VERSION"
@@ -222,48 +226,34 @@ else
     EXISTING_CONTAINER=0
 fi
 
-# Check if template exists and handle missing template
-if [[ "$TEMPLATE" == local:* ]]; then
-    TEMPLATE_FILE=$(basename "$TEMPLATE" | cut -d: -f2)
-    if [[ ! -f "/var/lib/vz/template/cache/$TEMPLATE_FILE" ]]; then
-        msg_warning "Template file not found: $TEMPLATE"
+# Verify template is available
+# Extract template storage and name
+TEMPLATE_STORAGE_CHECK="${TEMPLATE%%:*}"
+TEMPLATE_NAME_ONLY="${TEMPLATE#*:}"
+TEMPLATE_NAME_ONLY="${TEMPLATE_NAME_ONLY#vztmpl/}"
 
-        # Get available templates
-        mapfile -t AVAILABLE_TEMPLATES < <(ls -1 /var/lib/vz/template/cache/*.tar.zst 2>/dev/null | sort -V)
-
-        if [[ ${#AVAILABLE_TEMPLATES[@]} -eq 0 ]]; then
-            msg_error "No templates found in /var/lib/vz/template/cache/"
-            msg_info "Please download a template first:"
-            msg_info "  pveam download local debian-12-standard"
-            exit 1
-        fi
-
+# Check if template exists using pveam (works for all storage types)
+if ! pveam list "$TEMPLATE_STORAGE_CHECK" 2>/dev/null | grep -q "$TEMPLATE_NAME_ONLY"; then
+    # Try to find template in available list
+    msg_warning "Template not found in storage, checking available templates..."
+    
+    # Get available templates from pveam
+    AVAILABLE_TEMPLATE_NAMES=$(pveam available 2>/dev/null | awk '{print $2}' | grep -i debian | head -1)
+    
+    if [[ -z "$AVAILABLE_TEMPLATE_NAMES" ]]; then
+        msg_error "No Debian templates available"
         msg_info "Available templates:"
-        for i in "${!AVAILABLE_TEMPLATES[@]}"; do
-            TEMPLATE_NAME=$(basename "${AVAILABLE_TEMPLATES[$i]}")
-            echo "  [$((i+1))] $TEMPLATE_NAME"
-        done
-
-        # If interactive, let user choose
-        if [[ -t 0 ]] && [[ -t 1 ]]; then
-            echo ""
-            read -p "Select template number [1-${#AVAILABLE_TEMPLATES[@]}] (default: 1): " SELECTION
-            SELECTION=${SELECTION:-1}
-            if [[ "$SELECTION" =~ ^[0-9]+$ ]] && [[ "$SELECTION" -ge 1 ]] && [[ "$SELECTION" -le ${#AVAILABLE_TEMPLATES[@]} ]]; then
-                SELECTED_TEMPLATE="${AVAILABLE_TEMPLATES[$((SELECTION-1))]}"
-                TEMPLATE="local:$(basename "$SELECTED_TEMPLATE")"
-                msg_info "Selected template: $TEMPLATE"
-            else
-                # Default to first template
-                TEMPLATE="local:$(basename "${AVAILABLE_TEMPLATES[0]}")"
-                msg_info "Using first available template: $TEMPLATE"
-            fi
-        else
-            # Non-interactive: use first available
-            TEMPLATE="local:$(basename "${AVAILABLE_TEMPLATES[0]}")"
-            msg_info "Using first available template: $TEMPLATE"
-        fi
+        pveam available 2>/dev/null | head -10 || echo "  None found"
+        msg_info "Please download a template first:"
+        msg_info "  pveam update"
+        msg_info "  pveam download local debian-12-standard"
+        exit 1
     fi
+    
+    msg_info "Using available template: $AVAILABLE_TEMPLATE_NAMES"
+    TEMPLATE_STORAGE_DETECTED=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "local")
+    TEMPLATE="${TEMPLATE_STORAGE_DETECTED}:${AVAILABLE_TEMPLATE_NAMES}"
+    msg_info "Template set to: $TEMPLATE"
 fi
 
 msg_info "========================================="
@@ -325,19 +315,19 @@ if [[ $EXISTING_CONTAINER -eq 0 ]]; then
     fi
 
     # Template path format: storage:vztmpl/template-name (learned from all-templates.sh)
-    # Extract storage and filename from TEMPLATE
-    if [[ "$TEMPLATE" == *:* ]]; then
-        # Template has storage prefix (e.g., local:debian-12-standard_12.12-1_amd64.tar.zst)
-        TEMPLATE_STORAGE="${TEMPLATE%%:*}"
-        TEMPLATE_NAME="${TEMPLATE#*:}"
-        # Remove vztmpl/ if already present
-        TEMPLATE_NAME="${TEMPLATE_NAME#vztmpl/}"
-        TEMPLATE_PATH="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"
-    else
-        # Template is just filename, use default storage
-        TEMPLATE_PATH="local:vztmpl/$TEMPLATE"
-    fi
+    # TEMPLATE is already in format: storage:template-name (e.g., local:debian-12-standard_12.12-1_amd64.tar.zst)
+    # Extract storage and template name
+    TEMPLATE_STORAGE="${TEMPLATE%%:*}"
+    TEMPLATE_NAME="${TEMPLATE#*:}"
+    
+    # Remove vztmpl/ if already present in template name
+    TEMPLATE_NAME="${TEMPLATE_NAME#vztmpl/}"
+    
+    # Build final template path: storage:vztmpl/template-name
+    TEMPLATE_PATH="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"
 
+    msg_info "Template storage: $TEMPLATE_STORAGE"
+    msg_info "Template name: $TEMPLATE_NAME"
     msg_info "Template path: $TEMPLATE_PATH"
 
     # Execute container creation
@@ -398,9 +388,10 @@ msg_info "Container IP: ${IP:-DHCP}"
 msg_info "Root Password: $PASSWORD"
 echo ""
 
-# Install Metabase
+# Install Metabase (following Docker best practices)
 msg_info "Installing Metabase dependencies..."
-exec_in_ct "apt update && apt install -y curl wget openjdk-17-jre-headless"
+# Use openjdk-21-jre-headless like the Docker image (learned from Dockerfile)
+exec_in_ct "DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends curl openjdk-21-jre-headless && apt-get clean && rm -rf /var/lib/apt/lists/*"
 
 msg_info "Creating Metabase user..."
 exec_in_ct "if ! id -u metabase >/dev/null 2>&1; then useradd -r -s /bin/false -d /opt/metabase -m metabase; fi"
@@ -408,20 +399,42 @@ exec_in_ct "if ! id -u metabase >/dev/null 2>&1; then useradd -r -s /bin/false -
 msg_info "Creating Metabase directories..."
 exec_in_ct "mkdir -p /opt/metabase/data && chown -R metabase:metabase /opt/metabase"
 
-msg_info "Downloading latest Metabase..."
-LATEST_VERSION=$(curl -s https://api.github.com/repos/metabase/metabase/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
-if [[ -z "$LATEST_VERSION" ]]; then
-    LATEST_VERSION="latest"
-    DOWNLOAD_URL="https://downloads.metabase.com/${LATEST_VERSION}/metabase.jar"
+# Metabase version - can be overridden with MB_VERSION env var
+MB_VERSION="${MB_VERSION:-}"
+if [[ -z "$MB_VERSION" ]]; then
+    # Try to get latest version from GitHub API
+    msg_info "Checking for latest Metabase version..."
+    LATEST_VERSION=$(curl -s https://api.github.com/repos/metabase/metabase/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/' || echo "")
+    if [[ -z "$LATEST_VERSION" ]]; then
+        msg_warning "Could not determine latest version, using 'latest'"
+        MB_VERSION="latest"
+        DOWNLOAD_URL="https://downloads.metabase.com/${MB_VERSION}/metabase.jar"
+    else
+        MB_VERSION="v${LATEST_VERSION}"
+        DOWNLOAD_URL="https://downloads.metabase.com/${MB_VERSION}/metabase.jar"
+    fi
 else
-    DOWNLOAD_URL="https://downloads.metabase.com/v${LATEST_VERSION}/metabase.jar"
+    # Use specified version (format: v0.54.9 or 0.54.9)
+    if [[ ! "$MB_VERSION" =~ ^v ]]; then
+        MB_VERSION="v${MB_VERSION}"
+    fi
+    DOWNLOAD_URL="https://downloads.metabase.com/${MB_VERSION}/metabase.jar"
 fi
 
-msg_info "Downloading Metabase v${LATEST_VERSION}..."
-exec_in_ct "wget -q -O /opt/metabase/metabase.jar '${DOWNLOAD_URL}' && chown metabase:metabase /opt/metabase/metabase.jar && chmod 755 /opt/metabase/metabase.jar"
+# JVM Heap size - configurable, default 512m (matching Dockerfile)
+MB_JAVA_HEAP="${MB_JAVA_HEAP:-512m}"
+
+msg_info "Downloading Metabase ${MB_VERSION}..."
+msg_info "JVM Heap size: ${MB_JAVA_HEAP}"
+exec_in_ct "curl -L -o /opt/metabase/metabase.jar '${DOWNLOAD_URL}' && chown metabase:metabase /opt/metabase/metabase.jar && chmod 644 /opt/metabase/metabase.jar"
+
+if [[ ! $? -eq 0 ]]; then
+    msg_error "Failed to download Metabase"
+    exit 1
+fi
 
 msg_info "Creating systemd service..."
-exec_in_ct 'cat > /etc/systemd/system/metabase.service <<EOF
+exec_in_ct "cat > /etc/systemd/system/metabase.service <<EOF
 [Unit]
 Description=Metabase Server
 Documentation=https://www.metabase.com/docs/latest/
@@ -433,7 +446,8 @@ Type=simple
 User=metabase
 Group=metabase
 WorkingDirectory=/opt/metabase
-ExecStart=/usr/bin/java -Xmx2g -jar /opt/metabase/metabase.jar
+Environment=\"MB_JAVA_HEAP=${MB_JAVA_HEAP}\"
+ExecStart=/usr/bin/java -Xmx${MB_JAVA_HEAP} -jar /opt/metabase/metabase.jar
 Restart=always
 RestartSec=10
 StandardOutput=journal
