@@ -34,7 +34,28 @@ msg_warning() {
 APP="${APP:-Metabase}"
 CTID="${CTID:-}"
 STORAGE="${STORAGE:-local-lvm}"
-TEMPLATE="${TEMPLATE:-local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst}"
+# Auto-detect latest Debian template if not specified
+if [[ -z "${TEMPLATE:-}" ]]; then
+    # Try to find the latest Debian 12 template
+    LATEST_DEBIAN12=$(ls -1 /var/lib/vz/template/cache/debian-12-standard_*.tar.zst 2>/dev/null | sort -V | tail -1)
+    if [[ -n "$LATEST_DEBIAN12" ]]; then
+        TEMPLATE="local:$(basename "$LATEST_DEBIAN12")"
+    else
+        # Fallback to Debian 13 if available
+        LATEST_DEBIAN13=$(ls -1 /var/lib/vz/template/cache/debian-13-standard_*.tar.zst 2>/dev/null | sort -V | tail -1)
+        if [[ -n "$LATEST_DEBIAN13" ]]; then
+            TEMPLATE="local:$(basename "$LATEST_DEBIAN13")"
+        else
+            # Fallback to first available template
+            FIRST_TEMPLATE=$(ls -1 /var/lib/vz/template/cache/*.tar.zst 2>/dev/null | head -1)
+            if [[ -n "$FIRST_TEMPLATE" ]]; then
+                TEMPLATE="local:$(basename "$FIRST_TEMPLATE")"
+            else
+                TEMPLATE="local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst"
+            fi
+        fi
+    fi
+fi
 PASSWORD="${PASSWORD:-}"
 ROOTFS_SIZE="${ROOTFS_SIZE:-8G}"
 CPU_CORES="${CPU_CORES:-2}"
@@ -170,14 +191,47 @@ else
     EXISTING_CONTAINER=0
 fi
 
-# Check if template exists
+# Check if template exists and handle missing template
 if [[ "$TEMPLATE" == local:* ]]; then
     TEMPLATE_FILE=$(basename "$TEMPLATE" | cut -d: -f2)
     if [[ ! -f "/var/lib/vz/template/cache/$TEMPLATE_FILE" ]]; then
         msg_warning "Template file not found: $TEMPLATE"
+
+        # Get available templates
+        mapfile -t AVAILABLE_TEMPLATES < <(ls -1 /var/lib/vz/template/cache/*.tar.zst 2>/dev/null | sort -V)
+
+        if [[ ${#AVAILABLE_TEMPLATES[@]} -eq 0 ]]; then
+            msg_error "No templates found in /var/lib/vz/template/cache/"
+            msg_info "Please download a template first:"
+            msg_info "  pveam download local debian-12-standard"
+            exit 1
+        fi
+
         msg_info "Available templates:"
-        ls -1 /var/lib/vz/template/cache/*.tar.zst 2>/dev/null | sed 's|/var/lib/vz/template/cache/|local:|' || echo "  None found"
-        exit 1
+        for i in "${!AVAILABLE_TEMPLATES[@]}"; do
+            TEMPLATE_NAME=$(basename "${AVAILABLE_TEMPLATES[$i]}")
+            echo "  [$((i+1))] $TEMPLATE_NAME"
+        done
+
+        # If interactive, let user choose
+        if [[ -t 0 ]] && [[ -t 1 ]]; then
+            echo ""
+            read -p "Select template number [1-${#AVAILABLE_TEMPLATES[@]}] (default: 1): " SELECTION
+            SELECTION=${SELECTION:-1}
+            if [[ "$SELECTION" =~ ^[0-9]+$ ]] && [[ "$SELECTION" -ge 1 ]] && [[ "$SELECTION" -le ${#AVAILABLE_TEMPLATES[@]} ]]; then
+                SELECTED_TEMPLATE="${AVAILABLE_TEMPLATES[$((SELECTION-1))]}"
+                TEMPLATE="local:$(basename "$SELECTED_TEMPLATE")"
+                msg_info "Selected template: $TEMPLATE"
+            else
+                # Default to first template
+                TEMPLATE="local:$(basename "${AVAILABLE_TEMPLATES[0]}")"
+                msg_info "Using first available template: $TEMPLATE"
+            fi
+        else
+            # Non-interactive: use first available
+            TEMPLATE="local:$(basename "${AVAILABLE_TEMPLATES[0]}")"
+            msg_info "Using first available template: $TEMPLATE"
+        fi
     fi
 fi
 
