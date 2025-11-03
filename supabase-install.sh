@@ -225,7 +225,7 @@ pct exec $CTID -- bash -c "if ! docker compose version &>/dev/null; then curl -L
 
 # Create Supabase directory structure
 msg "Creating Supabase directory structure..."
-pct exec $CTID -- bash -c "mkdir -p /opt/supabase/{volumes/postgres,volumes/storage,volumes/db,volumes/kong,volumes/logs} && chmod -R 755 /opt/supabase"
+pct exec $CTID -- bash -c "mkdir -p /opt/supabase/{volumes/postgres,volumes/storage,volumes/db,volumes/kong,volumes/logs,volumes/functions} && chmod -R 755 /opt/supabase"
 
 # Generate secure passwords and keys
 msg "Generating secure passwords and API keys..."
@@ -235,13 +235,39 @@ ANON_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 SERVICE_ROLE_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 
-# Install Supabase CLI
-msg "Installing Supabase CLI..."
-pct exec $CTID -- bash -c "curl -fsSL https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz -o /tmp/supabase.tar.gz && tar -xzf /tmp/supabase.tar.gz -C /tmp && chmod +x /tmp/supabase && mv /tmp/supabase /usr/local/bin/supabase && rm -f /tmp/supabase.tar.gz && supabase --version"
+# Install Supabase CLI (optional - we'll use docker compose directly)
+msg "Installing Supabase CLI (optional)..."
+pct exec $CTID -- bash -c "
+  cd /tmp && \
+  curl -fsSL -L https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz -o supabase.tar.gz && \
+  tar -xzf supabase.tar.gz && \
+  if [ -f supabase ]; then
+    chmod +x supabase && \
+    mv supabase /usr/local/bin/supabase && \
+    supabase --version && \
+    echo 'Supabase CLI installed successfully'
+  elif [ -f supabase_linux_amd64/supabase ]; then
+    chmod +x supabase_linux_amd64/supabase && \
+    mv supabase_linux_amd64/supabase /usr/local/bin/supabase && \
+    supabase --version && \
+    echo 'Supabase CLI installed successfully'
+  else
+    echo 'Warning: Could not find supabase binary in archive, continuing without CLI...' && \
+    find /tmp -name supabase -type f 2>/dev/null | head -1
+  fi && \
+  rm -rf /tmp/supabase* 2>/dev/null || true
+" || warn "Supabase CLI installation failed, will use docker compose directly"
 
-# Initialize Supabase project
-msg "Initializing Supabase project..."
-pct exec $CTID -- bash -c "cd /opt && supabase init --name $NAME || true"
+# Initialize Supabase project (optional - CLI might not be needed)
+msg "Initializing Supabase project structure..."
+pct exec $CTID -- bash -c "cd /opt && mkdir -p $NAME && cd $NAME || true"
+# Try to use Supabase CLI if available, otherwise skip
+if pct exec $CTID -- command -v supabase &>/dev/null; then
+  msg "Using Supabase CLI to initialize..."
+  pct exec $CTID -- bash -c "cd /opt/$NAME && supabase init --name $NAME 2>&1 || true"
+else
+  msg "Supabase CLI not available, using manual setup..."
+fi
 
 # Create .env file with all required configuration
 msg "Creating Supabase configuration (.env)..."
@@ -406,9 +432,9 @@ pct exec $CTID -- bash -c "cd /opt/supabase && \
   sed -i \"s|\\\${VAULT_ENC_KEY}|$VAULT_ENC_KEY|g\" .env && \
   sed -i \"s|\\\${DASHBOARD_PASSWORD}|$DASHBOARD_PASSWORD|g\" .env"
 
-# Use Supabase CLI to start services (it handles docker-compose automatically)
-msg "Starting Supabase with CLI (this will download and configure everything)..."
-pct exec $CTID -- bash -c "cd /opt/supabase && export SUPABASE_DB_PASSWORD='$DB_PASSWORD' && export SUPABASE_JWT_SECRET='$JWT_SECRET' && supabase start --ignore-health-check 2>&1 || true"
+# Supabase CLI is optional - we'll use docker compose directly
+# The CLI would be useful for local dev, but for production we use docker-compose
+msg "Preparing Supabase configuration..."
 
 # If Supabase CLI didn't work, try using official docker-compose.yml
 if ! pct exec $CTID -- test -f /opt/supabase/docker-compose.yml; then
@@ -626,9 +652,9 @@ services:
       retries: 10
 COMPOSEEOF"
 
-# Create volumes directory for functions
-msg "Creating volumes directory..."
-pct exec $CTID -- bash -c "mkdir -p /opt/supabase/volumes/functions && chmod -R 755 /opt/supabase/volumes"
+# Verify volumes directory exists
+msg "Verifying volumes directory..."
+pct exec $CTID -- bash -c "mkdir -p /opt/supabase/volumes/{db,storage,kong,functions,logs} && chmod -R 755 /opt/supabase/volumes"
 
 # Pull Docker images and start services
 msg "Pulling Supabase Docker images (this may take a while)..."
