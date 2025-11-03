@@ -104,47 +104,62 @@ msg_info "========================================="
 if [[ $EXISTING_CONTAINER -eq 0 ]]; then
     msg_info "Creating LXC container $CTID..."
     
-    # Build pct create command
-    PCT_CMD="pct create $CTID $TEMPLATE"
-    PCT_CMD+=" --storage $STORAGE"
-    PCT_CMD+=" --hostname $HOSTNAME"
-    PCT_CMD+=" --password '$PASSWORD'"
-    PCT_CMD+=" --rootfs-size $ROOTFS_SIZE"
-    PCT_CMD+=" --cores $CPU_CORES"
-    PCT_CMD+=" --memory $RAM_MB"
-    PCT_CMD+=" --swap $SWAP_MB"
-    
+    # Build pct create command (Proxmox 9 syntax - learned from all-templates.sh)
+    # Key learnings: Use single dash (-option), array format, correct template path
+    PCT_OPTIONS=(
+        -arch "$(dpkg --print-architecture)"
+        -hostname "$HOSTNAME"
+        -password "$PASSWORD"
+        -cores "$CPU_CORES"
+        -memory "$RAM_MB"
+        -swap "$SWAP_MB"
+    )
+
+    # Extract numeric size (remove 'G' suffix if present)
+    ROOTFS_SIZE_NUM=$(echo "$ROOTFS_SIZE" | sed 's/G$//')
+    PCT_OPTIONS+=(-rootfs "$STORAGE:$ROOTFS_SIZE_NUM")
+
     # Network configuration
     if [[ -n "$IP" ]] && [[ -n "$GATEWAY" ]]; then
-        PCT_CMD+=" --net0 name=eth0,bridge=$BRIDGE,ip=$IP,gw=$GATEWAY"
+        PCT_OPTIONS+=(-net0 "name=eth0,bridge=$BRIDGE,ip=$IP,gw=$GATEWAY")
     else
-        PCT_CMD+=" --net0 name=eth0,bridge=$BRIDGE"
+        PCT_OPTIONS+=(-net0 "name=eth0,bridge=$BRIDGE")
         msg_warning "IP and Gateway not set. Container will use DHCP."
     fi
-    
-    # Features
+
+    # Features (comma-separated format)
+    FEATURES_LIST=""
     if [[ $UNPRIVILEGED -eq 1 ]]; then
-        PCT_CMD+=" --unprivileged 1"
+        PCT_OPTIONS+=(-unprivileged 1)
     fi
-    
+
     if [[ $NESTING -eq 1 ]]; then
-        PCT_CMD+=" --features nesting=1"
+        FEATURES_LIST="nesting=1"
     fi
-    
+
+    if [[ -n "$FEATURES_LIST" ]]; then
+        PCT_OPTIONS+=(-features "$FEATURES_LIST")
+    fi
+
     # Tags
     if [[ -n "$TAGS" ]]; then
-        PCT_CMD+=" --tags $TAGS"
+        PCT_OPTIONS+=(-tags "$TAGS")
     fi
-    
-    # Execute container creation
-    eval "$PCT_CMD"
-    
-    if [[ $? -eq 0 ]]; then
-        msg_ok "Container $CTID created successfully"
+
+    # Template path format: storage:vztmpl/template-name
+    if [[ "$TEMPLATE" == local:* ]]; then
+        TEMPLATE_PATH="$TEMPLATE"
     else
+        TEMPLATE_PATH="local:vztmpl/$TEMPLATE"
+    fi
+
+    # Execute container creation
+    pct create "$CTID" "$TEMPLATE_PATH" "${PCT_OPTIONS[@]}" || {
         msg_error "Failed to create container"
         exit 1
-    fi
+    }
+
+    msg_ok "Container $CTID created successfully"
 else
     msg_info "Using existing container $CTID"
 fi

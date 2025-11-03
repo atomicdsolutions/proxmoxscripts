@@ -33,7 +33,16 @@ msg_warning() {
 # Configuration (can be overridden by environment variables)
 APP="${APP:-Metabase}"
 CTID="${CTID:-}"
-STORAGE="${STORAGE:-local-lvm}"
+# Auto-detect storage if not specified (learned from all-templates.sh)
+STORAGE="${STORAGE:-}"
+if [[ -z "$STORAGE" ]]; then
+    # Get first available storage with rootdir content type
+    STORAGE=$(pvesm status -content rootdir 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "")
+    if [[ -z "$STORAGE" ]]; then
+        STORAGE="local-lvm"
+    fi
+    msg_info "Auto-detected storage: $STORAGE"
+fi
 # Auto-detect latest Debian template if not specified
 if [[ -z "${TEMPLATE:-}" ]]; then
     # Try to find the latest Debian 12 template
@@ -80,16 +89,16 @@ update_metabase() {
         msg_error "CTID must be specified for update"
         exit 1
     fi
-    
+
     if ! pct status "$CTID" &>/dev/null; then
         msg_error "Container $CTID not found"
         exit 1
     fi
-    
+
     msg_info "Checking for Metabase updates..."
     CURRENT_VERSION=$(exec_in_ct "java -jar /opt/metabase/metabase.jar version 2>/dev/null | head -n1 | grep -oP 'v\d+\.\d+\.\d+' | sed 's/v//' || echo 'unknown'")
     LATEST_VERSION=$(curl -s https://api.github.com/repos/metabase/metabase/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
-    
+
     if [[ "$CURRENT_VERSION" != "$LATEST_VERSION" ]] && [[ "$LATEST_VERSION" != "" ]]; then
         msg_info "Updating Metabase from $CURRENT_VERSION to $LATEST_VERSION"
         exec_in_ct "systemctl stop metabase"
@@ -106,6 +115,19 @@ update_metabase() {
 # Handle update command
 if [[ "${1:-}" == "update" ]]; then
     update_metabase
+fi
+
+# Auto-detect next available CTID if not provided (learned from all-templates.sh)
+if [[ -z "$CTID" ]] && command -v pvesh &>/dev/null; then
+    AUTO_CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo "")
+    if [[ -n "$AUTO_CTID" ]] && [[ "$AUTO_CTID" =~ ^[0-9]+$ ]]; then
+        msg_info "Auto-detected next available CTID: $AUTO_CTID"
+        read -p "Use CTID $AUTO_CTID? (Y/n): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            CTID="$AUTO_CTID"
+        fi
+    fi
 fi
 
 # Validate required parameters - prompt if interactive
@@ -250,48 +272,63 @@ msg_info "========================================="
 # Create container if it doesn't exist
 if [[ $EXISTING_CONTAINER -eq 0 ]]; then
     msg_info "Creating LXC container $CTID..."
-    
-    # Build pct create command
-    PCT_CMD="pct create $CTID $TEMPLATE"
-    PCT_CMD+=" --storage $STORAGE"
-    PCT_CMD+=" --hostname $HOSTNAME"
-    PCT_CMD+=" --password '$PASSWORD'"
-    PCT_CMD+=" --rootfs-size $ROOTFS_SIZE"
-    PCT_CMD+=" --cores $CPU_CORES"
-    PCT_CMD+=" --memory $RAM_MB"
-    PCT_CMD+=" --swap $SWAP_MB"
-    
+
+    # Build pct create command (Proxmox 9 syntax - learned from all-templates.sh)
+    # Key learnings: Use single dash (-option), array format, correct template path
+    PCT_OPTIONS=(
+        -arch "$(dpkg --print-architecture)"
+        -hostname "$HOSTNAME"
+        -password "$PASSWORD"
+        -cores "$CPU_CORES"
+        -memory "$RAM_MB"
+        -swap "$SWAP_MB"
+    )
+
+    # Extract numeric size (remove 'G' suffix if present)
+    ROOTFS_SIZE_NUM=$(echo "$ROOTFS_SIZE" | sed 's/G$//')
+    PCT_OPTIONS+=(-rootfs "$STORAGE:$ROOTFS_SIZE_NUM")
+
     # Network configuration
     if [[ -n "$IP" ]] && [[ -n "$GATEWAY" ]]; then
-        PCT_CMD+=" --net0 name=eth0,bridge=$BRIDGE,ip=$IP,gw=$GATEWAY"
+        PCT_OPTIONS+=(-net0 "name=eth0,bridge=$BRIDGE,ip=$IP,gw=$GATEWAY")
     else
-        PCT_CMD+=" --net0 name=eth0,bridge=$BRIDGE"
+        PCT_OPTIONS+=(-net0 "name=eth0,bridge=$BRIDGE")
         msg_warning "IP and Gateway not set. Container will use DHCP."
     fi
-    
-    # Features
+
+    # Features (comma-separated format)
+    FEATURES_LIST=""
     if [[ $UNPRIVILEGED -eq 1 ]]; then
-        PCT_CMD+=" --unprivileged 1"
+        PCT_OPTIONS+=(-unprivileged 1)
     fi
-    
+
     if [[ $NESTING -eq 1 ]]; then
-        PCT_CMD+=" --features nesting=1"
+        FEATURES_LIST="nesting=1"
     fi
-    
+
+    if [[ -n "$FEATURES_LIST" ]]; then
+        PCT_OPTIONS+=(-features "$FEATURES_LIST")
+    fi
+
     # Tags
     if [[ -n "$TAGS" ]]; then
-        PCT_CMD+=" --tags $TAGS"
+        PCT_OPTIONS+=(-tags "$TAGS")
     fi
-    
-    # Execute container creation
-    eval "$PCT_CMD"
-    
-    if [[ $? -eq 0 ]]; then
-        msg_ok "Container $CTID created successfully"
+
+    # Template path format: storage:vztmpl/template-name
+    if [[ "$TEMPLATE" == local:* ]]; then
+        TEMPLATE_PATH="$TEMPLATE"
     else
+        TEMPLATE_PATH="local:vztmpl/$TEMPLATE"
+    fi
+
+    # Execute container creation
+    pct create "$CTID" "$TEMPLATE_PATH" "${PCT_OPTIONS[@]}" || {
         msg_error "Failed to create container"
         exit 1
-    fi
+    }
+
+    msg_ok "Container $CTID created successfully"
 else
     msg_info "Using existing container $CTID"
 fi
@@ -310,11 +347,28 @@ for _ in {1..30}; do
     sleep 1
 done
 
-# Get container IP if not set
+# Get container IP if not set (improved method from all-templates.sh)
 if [[ -z "$IP" ]]; then
-    IP=$(pct exec "$CTID" -- ip -4 addr show eth0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1 || echo "")
-    if [[ -n "$IP" ]]; then
-        msg_info "Detected container IP: $IP"
+    msg_info "Detecting container IP address..."
+    max_attempts=5
+    attempt=1
+    while [[ $attempt -le $max_attempts ]]; do
+        IP=$(pct exec "$CTID" -- ip a show dev eth0 2>/dev/null | grep -oP 'inet \K[^/]+' || echo "")
+        if [[ -n "$IP" ]]; then
+            msg_info "Detected container IP: $IP"
+            break
+        else
+            if [[ $attempt -lt $max_attempts ]]; then
+                msg_warning "Attempt $attempt: IP address not found. Waiting..."
+                sleep 3
+            fi
+            ((attempt++))
+        fi
+    done
+
+    if [[ -z "$IP" ]]; then
+        msg_warning "Could not automatically detect IP address"
+        msg_info "Check IP manually with: pct exec $CTID -- ip a"
     fi
 fi
 
