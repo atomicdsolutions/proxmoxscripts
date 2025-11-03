@@ -45,11 +45,11 @@ function msg() {
   echo -e "$TEXT"
 }
 function cleanup_ctid() {
-  if pct status $CTID &>/dev/null; then
-    if [ "$(pct status $CTID | awk '{print $2}')" == "running" ]; then
-      pct stop $CTID
+  if pct status $CTID &>/dev/null 2>&1; then
+    if [ "$(pct status $CTID 2>/dev/null | awk '{print $2}')" == "running" ]; then
+      pct stop $CTID 2>/dev/null || true
     fi
-    pct destroy $CTID
+    pct destroy $CTID 2>/dev/null || true
   fi
 }
 
@@ -211,7 +211,10 @@ set -eEuo pipefail
 
 # Install Docker and dependencies
 msg "Installing Docker and dependencies..."
-pct exec $CTID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release && install -m 0755 -d /etc/apt/keyrings && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && chmod a+r /etc/apt/keyrings/docker.gpg && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable\" | tee /etc/apt/sources.list.d/docker.list > /dev/null && apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && apt-get clean && rm -rf /var/lib/apt/lists/*"
+# Get Debian codename (fallback methods)
+pct exec $CTID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release"
+DEBIAN_CODENAME=$(pct exec $CTID -- bash -c "lsb_release -cs 2>/dev/null || grep VERSION_CODENAME /etc/os-release | cut -d= -f2 | tr -d '\"' || echo 'bookworm'")
+pct exec $CTID -- bash -c "install -m 0755 -d /etc/apt/keyrings && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && chmod a+r /etc/apt/keyrings/docker.gpg && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${DEBIAN_CODENAME} stable\" | tee /etc/apt/sources.list.d/docker.list > /dev/null && apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && apt-get clean && rm -rf /var/lib/apt/lists/*"
 
 msg "Starting Docker service..."
 pct exec $CTID -- bash -c "systemctl enable docker && systemctl start docker"
