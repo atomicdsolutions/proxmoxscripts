@@ -236,38 +236,13 @@ SERVICE_ROLE_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 
 # Install Supabase CLI (optional - we'll use docker compose directly)
-msg "Installing Supabase CLI (optional)..."
-pct exec $CTID -- bash -c "
-  cd /tmp && \
-  curl -fsSL -L https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz -o supabase.tar.gz && \
-  tar -xzf supabase.tar.gz && \
-  if [ -f supabase ]; then
-    chmod +x supabase && \
-    mv supabase /usr/local/bin/supabase && \
-    supabase --version && \
-    echo 'Supabase CLI installed successfully'
-  elif [ -f supabase_linux_amd64/supabase ]; then
-    chmod +x supabase_linux_amd64/supabase && \
-    mv supabase_linux_amd64/supabase /usr/local/bin/supabase && \
-    supabase --version && \
-    echo 'Supabase CLI installed successfully'
-  else
-    echo 'Warning: Could not find supabase binary in archive, continuing without CLI...' && \
-    find /tmp -name supabase -type f 2>/dev/null | head -1
-  fi && \
-  rm -rf /tmp/supabase* 2>/dev/null || true
-" || warn "Supabase CLI installation failed, will use docker compose directly"
+# Since we're using docker compose, CLI is not required - skip installation to avoid errors
+msg "Skipping Supabase CLI installation (using docker compose directly)..."
+warn "Supabase CLI is optional and not required for docker compose deployment"
 
-# Initialize Supabase project (optional - CLI might not be needed)
-msg "Initializing Supabase project structure..."
-pct exec $CTID -- bash -c "cd /opt && mkdir -p $NAME && cd $NAME || true"
-# Try to use Supabase CLI if available, otherwise skip
-if pct exec $CTID -- command -v supabase &>/dev/null; then
-  msg "Using Supabase CLI to initialize..."
-  pct exec $CTID -- bash -c "cd /opt/$NAME && supabase init --name $NAME 2>&1 || true"
-else
-  msg "Supabase CLI not available, using manual setup..."
-fi
+# Create Supabase project directory structure
+msg "Creating Supabase project directory..."
+pct exec $CTID -- bash -c "mkdir -p /opt/supabase && cd /opt/supabase"
 
 # Create .env file with all required configuration
 msg "Creating Supabase configuration (.env)..."
