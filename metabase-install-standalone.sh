@@ -44,26 +44,35 @@ if [[ -z "$STORAGE" ]]; then
     msg_info "Auto-detected storage: $STORAGE"
 fi
 # Auto-detect latest Debian template if not specified
+# Also detect template storage (can be different from container storage)
 if [[ -z "${TEMPLATE:-}" ]]; then
     # Try to find the latest Debian 12 template
     LATEST_DEBIAN12=$(ls -1 /var/lib/vz/template/cache/debian-12-standard_*.tar.zst 2>/dev/null | sort -V | tail -1)
     if [[ -n "$LATEST_DEBIAN12" ]]; then
-        TEMPLATE="local:$(basename "$LATEST_DEBIAN12")"
+        TEMPLATE_NAME=$(basename "$LATEST_DEBIAN12")
+        # Find which storage has this template (learned from all-templates.sh)
+        TEMPLATE_STORAGE_DETECTED=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "local")
+        TEMPLATE="${TEMPLATE_STORAGE_DETECTED}:${TEMPLATE_NAME}"
     else
         # Fallback to Debian 13 if available
         LATEST_DEBIAN13=$(ls -1 /var/lib/vz/template/cache/debian-13-standard_*.tar.zst 2>/dev/null | sort -V | tail -1)
         if [[ -n "$LATEST_DEBIAN13" ]]; then
-            TEMPLATE="local:$(basename "$LATEST_DEBIAN13")"
+            TEMPLATE_NAME=$(basename "$LATEST_DEBIAN13")
+            TEMPLATE_STORAGE_DETECTED=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "local")
+            TEMPLATE="${TEMPLATE_STORAGE_DETECTED}:${TEMPLATE_NAME}"
         else
             # Fallback to first available template
             FIRST_TEMPLATE=$(ls -1 /var/lib/vz/template/cache/*.tar.zst 2>/dev/null | head -1)
             if [[ -n "$FIRST_TEMPLATE" ]]; then
-                TEMPLATE="local:$(basename "$FIRST_TEMPLATE")"
+                TEMPLATE_NAME=$(basename "$FIRST_TEMPLATE")
+                TEMPLATE_STORAGE_DETECTED=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "local")
+                TEMPLATE="${TEMPLATE_STORAGE_DETECTED}:${TEMPLATE_NAME}"
             else
-                TEMPLATE="local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst"
+                TEMPLATE="local:debian-12-standard_12.12-1_amd64.tar.zst"
             fi
         fi
     fi
+    msg_info "Auto-detected template: $TEMPLATE"
 fi
 PASSWORD="${PASSWORD:-}"
 ROOTFS_SIZE="${ROOTFS_SIZE:-8G}"
@@ -315,16 +324,28 @@ if [[ $EXISTING_CONTAINER -eq 0 ]]; then
         PCT_OPTIONS+=(-tags "$TAGS")
     fi
 
-    # Template path format: storage:vztmpl/template-name
-    if [[ "$TEMPLATE" == local:* ]]; then
-        TEMPLATE_PATH="$TEMPLATE"
+    # Template path format: storage:vztmpl/template-name (learned from all-templates.sh)
+    # Extract storage and filename from TEMPLATE
+    if [[ "$TEMPLATE" == *:* ]]; then
+        # Template has storage prefix (e.g., local:debian-12-standard_12.12-1_amd64.tar.zst)
+        TEMPLATE_STORAGE="${TEMPLATE%%:*}"
+        TEMPLATE_NAME="${TEMPLATE#*:}"
+        # Remove vztmpl/ if already present
+        TEMPLATE_NAME="${TEMPLATE_NAME#vztmpl/}"
+        TEMPLATE_PATH="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"
     else
+        # Template is just filename, use default storage
         TEMPLATE_PATH="local:vztmpl/$TEMPLATE"
     fi
+
+    msg_info "Template path: $TEMPLATE_PATH"
 
     # Execute container creation
     pct create "$CTID" "$TEMPLATE_PATH" "${PCT_OPTIONS[@]}" || {
         msg_error "Failed to create container"
+        msg_info "Troubleshooting:"
+        msg_info "  Check template exists: ls -lh /var/lib/vz/template/cache/$(basename $TEMPLATE_PATH | cut -d/ -f2)"
+        msg_info "  Check template storage: pvesm status -content vztmpl"
         exit 1
     }
 
