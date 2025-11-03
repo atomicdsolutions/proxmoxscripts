@@ -87,24 +87,66 @@ if [[ "${1:-}" == "update" ]]; then
     update_metabase
 fi
 
-# Validate required parameters
+# Validate required parameters - prompt if interactive
 if [[ -z "$CTID" ]]; then
-    msg_error "CTID (Container ID) must be specified"
-    echo ""
-    echo "Usage:"
-    echo "  CTID=100 bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/atomicdsolutions/proxmoxscripts/main/metabase-install-standalone.sh)\""
-    echo "  CTID=100 IP=192.168.1.100/24 GATEWAY=192.168.1.1 bash -c \"\$(curl -fsSL ...)\""
-    echo "  CTID=100 bash -c \"\$(curl -fsSL ...)\" update"
-    echo ""
-    echo "Environment variables:"
-    echo "  CTID       - Container ID (required)"
-    echo "  IP         - Static IP address (e.g., 192.168.1.100/24)"
-    echo "  GATEWAY    - Gateway IP (e.g., 192.168.1.1)"
-    echo "  PASSWORD   - Root password (auto-generated if not set)"
-    echo "  HOSTNAME   - Container hostname (default: metabase-lxc)"
-    echo "  STORAGE    - Storage pool (default: local-lvm)"
-    echo "  TEMPLATE   - LXC template (default: debian-12)"
-    exit 1
+    # Check if running interactively (TTY available)
+    if [[ -t 0 ]] && [[ -t 1 ]]; then
+        echo ""
+        msg_info "Interactive Mode - Please provide the following information:"
+        echo ""
+        read -p "Container ID (CTID) [required]: " CTID
+        if [[ -z "$CTID" ]]; then
+            msg_error "CTID is required"
+            exit 1
+        fi
+
+        read -p "Static IP address (e.g., 192.168.1.100/24) [optional, press Enter for DHCP]: " IP_INPUT
+        if [[ -n "$IP_INPUT" ]]; then
+            IP="$IP_INPUT"
+        fi
+
+        if [[ -n "$IP" ]]; then
+            read -p "Gateway IP (e.g., 192.168.1.1) [optional]: " GATEWAY_INPUT
+            if [[ -n "$GATEWAY_INPUT" ]]; then
+                GATEWAY="$GATEWAY_INPUT"
+            fi
+        fi
+
+        read -p "Hostname [default: metabase-lxc, press Enter for default]: " HOSTNAME_INPUT
+        if [[ -n "$HOSTNAME_INPUT" ]]; then
+            HOSTNAME="$HOSTNAME_INPUT"
+        fi
+
+        read -p "Root password [press Enter to auto-generate]: " PASSWORD_INPUT
+        if [[ -n "$PASSWORD_INPUT" ]]; then
+            PASSWORD="$PASSWORD_INPUT"
+        fi
+
+        echo ""
+    else
+        # Non-interactive mode - show usage
+        msg_error "CTID (Container ID) must be specified"
+        echo ""
+        echo "Usage:"
+        echo "  CTID=100 bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/atomicdsolutions/proxmoxscripts/main/metabase-install-standalone.sh)\""
+        echo "  CTID=100 IP=192.168.1.100/24 GATEWAY=192.168.1.1 bash -c \"\$(curl -fsSL ...)\""
+        echo "  CTID=100 bash -c \"\$(curl -fsSL ...)\" update"
+        echo ""
+        echo "Or download and run locally for interactive mode:"
+        echo "  curl -fsSL https://raw.githubusercontent.com/atomicdsolutions/proxmoxscripts/main/metabase-install-standalone.sh -o metabase-install.sh"
+        echo "  chmod +x metabase-install.sh"
+        echo "  ./metabase-install.sh"
+        echo ""
+        echo "Environment variables:"
+        echo "  CTID       - Container ID (required)"
+        echo "  IP         - Static IP address (e.g., 192.168.1.100/24)"
+        echo "  GATEWAY    - Gateway IP (e.g., 192.168.1.1)"
+        echo "  PASSWORD   - Root password (auto-generated if not set)"
+        echo "  HOSTNAME   - Container hostname (default: metabase-lxc)"
+        echo "  STORAGE    - Storage pool (default: local-lvm)"
+        echo "  TEMPLATE   - LXC template (default: debian-12)"
+        exit 1
+    fi
 fi
 
 # Generate password if not set
@@ -207,7 +249,7 @@ sleep 3
 
 # Wait for container to be ready
 msg_info "Waiting for container to be ready..."
-for i in {1..30}; do
+for _ in {1..30}; do
     if pct exec "$CTID" -- ping -c 1 127.0.0.1 &>/dev/null; then
         break
     fi
