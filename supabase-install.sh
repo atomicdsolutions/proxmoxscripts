@@ -237,7 +237,7 @@ ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 
 # Install Supabase CLI
 msg "Installing Supabase CLI..."
-pct exec $CTID -- bash -c "curl -fsSL https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz -o /tmp/supabase.tar.gz && tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin && chmod +x /usr/local/bin/supabase && rm -f /tmp/supabase.tar.gz"
+pct exec $CTID -- bash -c "curl -fsSL https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz -o /tmp/supabase.tar.gz && tar -xzf /tmp/supabase.tar.gz -C /tmp && chmod +x /tmp/supabase && mv /tmp/supabase /usr/local/bin/supabase && rm -f /tmp/supabase.tar.gz && supabase --version"
 
 # Initialize Supabase project
 msg "Initializing Supabase project..."
@@ -316,16 +316,95 @@ ENABLE_PGVECTOR=true
 SECRET_KEY_BASE=\${SECRET_KEY_BASE}
 POOLER_DB_POOL_SIZE=20
 POOLER_DB_MAX_CLIENT_CONN=100
+POOLER_DEFAULT_POOL_SIZE=20
+POOLER_MAX_CLIENT_CONN=100
+POOLER_PROXY_PORT_TRANSACTION=5432
+POOLER_TENANT_ID=
+
+# API Keys (will be generated)
+ANON_KEY=\${ANON_KEY}
+SERVICE_ROLE_KEY=\${SERVICE_ROLE_KEY}
+
+# URLs
+SUPABASE_PUBLIC_URL=http://${IP}:8000
+API_EXTERNAL_URL=http://${IP}:8000
+SITE_URL=http://${IP}:8000
+
+# JWT
+JWT_EXPIRY=3600
+
+# Studio/Dashboard
+STUDIO_DEFAULT_ORGANIZATION=Default Organization
+STUDIO_DEFAULT_PROJECT=Default Project
+DASHBOARD_USERNAME=admin
+DASHBOARD_PASSWORD=\${DASHBOARD_PASSWORD}
+
+# Auth Configuration
+ENABLE_ANONYMOUS_USERS=true
+ENABLE_EMAIL_AUTOCONFIRM=false
+ENABLE_EMAIL_SIGNUP=true
+ENABLE_PHONE_SIGNUP=false
+ENABLE_PHONE_AUTOCONFIRM=false
+DISABLE_SIGNUP=false
+
+# SMTP (optional - leave empty for local dev)
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
+SMTP_ADMIN_EMAIL=
+SMTP_SENDER_NAME=Supabase
+
+# Mailer URLs
+MAILER_URLPATHS_INVITE=/auth/v1/verify
+MAILER_URLPATHS_CONFIRMATION=/auth/v1/verify
+MAILER_URLPATHS_RECOVERY=/auth/v1/verify
+MAILER_URLPATHS_EMAIL_CHANGE=/auth/v1/verify
+ADDITIONAL_REDIRECT_URLS=
+
+# Storage/Image Proxy
+IMGPROXY_ENABLE_WEBP_DETECTION=false
+
+# Functions
+FUNCTIONS_VERIFY_JWT=true
+
+# Logging/Logflare (optional)
+LOGFLARE_PUBLIC_ACCESS_TOKEN=
+LOGFLARE_PRIVATE_ACCESS_TOKEN=
+
+# Database Meta
+PG_META_CRYPTO_KEY=\${PG_META_CRYPTO_KEY}
+
+# Docker
+DOCKER_SOCKET_LOCATION=/var/run/docker.sock
+
+# Vault
+VAULT_ENC_KEY=\${VAULT_ENC_KEY}
+
+# Kong
+KONG_HTTP_PORT=8000
+KONG_HTTPS_PORT=8443
 
 # Logging
 LOG_LEVEL=info
 ENVEOF"
 
-# Generate SECRET_KEY_BASE if not set
+# Generate additional secrets
 SECRET_KEY_BASE="${SECRET_KEY_BASE:-$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)}"
+PG_META_CRYPTO_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+VAULT_ENC_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+DASHBOARD_PASSWORD=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
 
 # Set actual values in .env
-pct exec $CTID -- bash -c "cd /opt/supabase && sed -i \"s|\\\${POSTGRES_PASSWORD}|$DB_PASSWORD|g\" .env && sed -i \"s|\\\${JWT_SECRET}|$JWT_SECRET|g\" .env && sed -i \"s|\\\${SECRET_KEY_BASE}|$SECRET_KEY_BASE|g\" .env"
+pct exec $CTID -- bash -c "cd /opt/supabase && \
+  sed -i \"s|\\\${POSTGRES_PASSWORD}|$DB_PASSWORD|g\" .env && \
+  sed -i \"s|\\\${JWT_SECRET}|$JWT_SECRET|g\" .env && \
+  sed -i \"s|\\\${SECRET_KEY_BASE}|$SECRET_KEY_BASE|g\" .env && \
+  sed -i \"s|\\\${ANON_KEY}|$ANON_KEY|g\" .env && \
+  sed -i \"s|\\\${SERVICE_ROLE_KEY}|$SERVICE_ROLE_KEY|g\" .env && \
+  sed -i \"s|\\\${PG_META_CRYPTO_KEY}|$PG_META_CRYPTO_KEY|g\" .env && \
+  sed -i \"s|\\\${VAULT_ENC_KEY}|$VAULT_ENC_KEY|g\" .env && \
+  sed -i \"s|\\\${DASHBOARD_PASSWORD}|$DASHBOARD_PASSWORD|g\" .env"
 
 # Use Supabase CLI to start services (it handles docker-compose automatically)
 msg "Starting Supabase with CLI (this will download and configure everything)..."
@@ -335,6 +414,8 @@ pct exec $CTID -- bash -c "cd /opt/supabase && export SUPABASE_DB_PASSWORD='$DB_
 if ! pct exec $CTID -- test -f /opt/supabase/docker-compose.yml; then
   msg "Downloading official Supabase docker-compose.yml..."
   pct exec $CTID -- bash -c "curl -fsSL https://raw.githubusercontent.com/supabase/supabase/master/docker/docker-compose.yml -o /opt/supabase/docker-compose.yml"
+  # Fix docker socket volume issue in official compose file
+  pct exec $CTID -- bash -c "sed -i 's|/var/run/docker.sock:ro,z|/var/run/docker.sock:/var/run/docker.sock:ro|g' /opt/supabase/docker-compose.yml || true"
 fi
 
 # Create a backup docker-compose.yml if the official one has issues
@@ -553,13 +634,9 @@ pct exec $CTID -- bash -c "mkdir -p /opt/supabase/volumes/functions && chmod -R 
 msg "Pulling Supabase Docker images (this may take a while)..."
 pct exec $CTID -- bash -c "cd /opt/supabase && (docker compose pull 2>/dev/null || docker-compose pull 2>/dev/null || true)"
 
-# Start Supabase services using Supabase CLI (preferred) or docker compose
-msg "Starting Supabase services..."
-if pct exec $CTID -- command -v supabase &> /dev/null; then
-  pct exec $CTID -- bash -c "cd /opt/supabase && export SUPABASE_DB_PASSWORD='$DB_PASSWORD' && supabase start --ignore-health-check 2>&1 || (docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null || true)"
-else
-  pct exec $CTID -- bash -c "cd /opt/supabase && (docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null || true)"
-fi
+# Start Supabase services using docker compose (Supabase CLI requires full setup)
+msg "Starting Supabase services with docker compose..."
+pct exec $CTID -- bash -c "cd /opt/supabase && docker compose up -d 2>&1 | head -50 || (docker compose version && docker compose up -d 2>&1 | head -50) || true"
 
 msg "Waiting for services to be ready..."
 sleep 10
@@ -577,10 +654,23 @@ fi
 echo "=== Supabase Installation Credentials ===" >>~/$NAME.creds
 echo "Container ID: $CTID" >>~/$NAME.creds
 echo "Root Password: ${PASS}" >>~/$NAME.creds
-echo "Database Password: ${DB_PASSWORD}" >>~/$NAME.creds
-echo "JWT Secret: ${JWT_SECRET}" >>~/$NAME.creds
-echo "Anon Key: ${ANON_KEY}" >>~/$NAME.creds
-echo "Service Role Key: ${SERVICE_ROLE_KEY}" >>~/$NAME.creds
+echo "" >>~/$NAME.creds
+echo "Database:" >>~/$NAME.creds
+echo "  Password: ${DB_PASSWORD}" >>~/$NAME.creds
+echo "" >>~/$NAME.creds
+echo "API Keys:" >>~/$NAME.creds
+echo "  Anon Key: ${ANON_KEY}" >>~/$NAME.creds
+echo "  Service Role Key: ${SERVICE_ROLE_KEY}" >>~/$NAME.creds
+echo "  JWT Secret: ${JWT_SECRET}" >>~/$NAME.creds
+echo "" >>~/$NAME.creds
+echo "Secrets:" >>~/$NAME.creds
+echo "  SECRET_KEY_BASE: ${SECRET_KEY_BASE}" >>~/$NAME.creds
+echo "  PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY}" >>~/$NAME.creds
+echo "  VAULT_ENC_KEY: ${VAULT_ENC_KEY}" >>~/$NAME.creds
+echo "" >>~/$NAME.creds
+echo "Dashboard:" >>~/$NAME.creds
+echo "  Username: admin" >>~/$NAME.creds
+echo "  Password: ${DASHBOARD_PASSWORD}" >>~/$NAME.creds
 echo "=======================================" >>~/$NAME.creds
 
 # Success message
