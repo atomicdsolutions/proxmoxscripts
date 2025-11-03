@@ -219,9 +219,9 @@ pct exec $CTID -- bash -c "install -m 0755 -d /etc/apt/keyrings && curl -fsSL ht
 msg "Starting Docker service..."
 pct exec $CTID -- bash -c "systemctl enable docker && systemctl start docker"
 
-# Install Docker Compose standalone (if needed)
+# Install Docker Compose standalone (if docker compose plugin not available)
 msg "Verifying Docker Compose..."
-pct exec $CTID -- bash -c "if ! command -v docker compose &> /dev/null; then curl -L \"https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose; fi"
+pct exec $CTID -- bash -c "if ! docker compose version &>/dev/null; then curl -L \"https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose && ln -sf /usr/local/bin/docker-compose /usr/local/bin/docker-compose-v1; fi"
 
 # Create Supabase directory structure
 msg "Creating Supabase directory structure..."
@@ -312,25 +312,35 @@ FUNCTIONS_PATH=/var/lib/supabase/functions
 # Database Extensions
 ENABLE_PGVECTOR=true
 
+# Additional required variables
+SECRET_KEY_BASE=\${SECRET_KEY_BASE}
+POOLER_DB_POOL_SIZE=20
+POOLER_DB_MAX_CLIENT_CONN=100
+
 # Logging
 LOG_LEVEL=info
 ENVEOF"
 
+# Generate SECRET_KEY_BASE if not set
+SECRET_KEY_BASE="${SECRET_KEY_BASE:-$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)}"
+
 # Set actual values in .env
-pct exec $CTID -- bash -c "cd /opt/supabase && sed -i \"s|\\\${POSTGRES_PASSWORD}|$DB_PASSWORD|g\" .env && sed -i \"s|\\\${JWT_SECRET}|$JWT_SECRET|g\" .env"
+pct exec $CTID -- bash -c "cd /opt/supabase && sed -i \"s|\\\${POSTGRES_PASSWORD}|$DB_PASSWORD|g\" .env && sed -i \"s|\\\${JWT_SECRET}|$JWT_SECRET|g\" .env && sed -i \"s|\\\${SECRET_KEY_BASE}|$SECRET_KEY_BASE|g\" .env"
 
-# Use Supabase CLI to generate docker-compose.yml
-msg "Generating docker-compose.yml with Supabase CLI..."
-pct exec $CTID -- bash -c "cd /opt/supabase && supabase start --ignore-health-check || true"
+# Use Supabase CLI to start services (it handles docker-compose automatically)
+msg "Starting Supabase with CLI (this will download and configure everything)..."
+pct exec $CTID -- bash -c "cd /opt/supabase && export SUPABASE_DB_PASSWORD='$DB_PASSWORD' && export SUPABASE_JWT_SECRET='$JWT_SECRET' && supabase start --ignore-health-check 2>&1 || true"
 
-# If CLI doesn't generate compose file, download official one
+# If Supabase CLI didn't work, try using official docker-compose.yml
 if ! pct exec $CTID -- test -f /opt/supabase/docker-compose.yml; then
   msg "Downloading official Supabase docker-compose.yml..."
   pct exec $CTID -- bash -c "curl -fsSL https://raw.githubusercontent.com/supabase/supabase/master/docker/docker-compose.yml -o /opt/supabase/docker-compose.yml"
 fi
 
-# Create a simplified docker-compose.yml if needed
-pct exec $CTID -- bash -c "cat > /opt/supabase/docker-compose-custom.yml <<'COMPOSEEOF'
+# Create a backup docker-compose.yml if the official one has issues
+if ! pct exec $CTID -- test -f /opt/supabase/docker-compose.yml; then
+  msg "Creating docker-compose.yml..."
+  pct exec $CTID -- bash -c "cat > /opt/supabase/docker-compose.yml <<'COMPOSEEOF'
 version: '3.8'
 
 services:
@@ -539,16 +549,16 @@ COMPOSEEOF"
 msg "Creating volumes directory..."
 pct exec $CTID -- bash -c "mkdir -p /opt/supabase/volumes/functions && chmod -R 755 /opt/supabase/volumes"
 
-# Pull Docker images
+# Pull Docker images and start services
 msg "Pulling Supabase Docker images (this may take a while)..."
-pct exec $CTID -- bash -c "cd /opt/supabase && docker compose pull || docker-compose pull"
+pct exec $CTID -- bash -c "cd /opt/supabase && (docker compose pull 2>/dev/null || docker-compose pull 2>/dev/null || true)"
 
-# Start Supabase services using Supabase CLI or docker compose
+# Start Supabase services using Supabase CLI (preferred) or docker compose
 msg "Starting Supabase services..."
 if pct exec $CTID -- command -v supabase &> /dev/null; then
-  pct exec $CTID -- bash -c "cd /opt/supabase && supabase start --ignore-health-check || docker compose up -d"
+  pct exec $CTID -- bash -c "cd /opt/supabase && export SUPABASE_DB_PASSWORD='$DB_PASSWORD' && supabase start --ignore-health-check 2>&1 || (docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null || true)"
 else
-  pct exec $CTID -- bash -c "cd /opt/supabase && docker compose up -d || docker-compose up -d"
+  pct exec $CTID -- bash -c "cd /opt/supabase && (docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null || true)"
 fi
 
 msg "Waiting for services to be ready..."
@@ -556,7 +566,7 @@ sleep 10
 
 # Check service status
 msg "Checking service status..."
-pct exec $CTID -- bash -c "cd /opt/supabase && (docker compose ps || docker-compose ps || supabase status) 2>/dev/null || true"
+pct exec $CTID -- bash -c "cd /opt/supabase && (supabase status 2>/dev/null || docker compose ps 2>/dev/null || docker-compose ps 2>/dev/null || docker ps --format 'table {{.Names}}\t{{.Status}}') 2>/dev/null | head -20 || true"
 
 # Start Proxmox VE Monitor-All if available
 if [[ -f /etc/systemd/system/ping-instances.service ]]; then
