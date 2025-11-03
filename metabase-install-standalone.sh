@@ -44,29 +44,26 @@ if [[ -z "$STORAGE" ]]; then
     msg_info "Auto-detected storage: $STORAGE"
 fi
 # Auto-detect latest Debian template if not specified
-# Also detect template storage (can be different from container storage)
+# Templates in /var/lib/vz/template/cache/ are always on "local" storage
 if [[ -z "${TEMPLATE:-}" ]]; then
     # Try to find the latest Debian 12 template
     LATEST_DEBIAN12=$(ls -1 /var/lib/vz/template/cache/debian-12-standard_*.tar.zst 2>/dev/null | sort -V | tail -1)
     if [[ -n "$LATEST_DEBIAN12" ]]; then
         TEMPLATE_NAME=$(basename "$LATEST_DEBIAN12")
-        # Find which storage has this template (learned from all-templates.sh)
-        TEMPLATE_STORAGE_DETECTED=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "local")
-        TEMPLATE="${TEMPLATE_STORAGE_DETECTED}:${TEMPLATE_NAME}"
+        # Templates in /var/lib/vz/template/cache/ are always on "local" storage
+        TEMPLATE="local:${TEMPLATE_NAME}"
     else
         # Fallback to Debian 13 if available
         LATEST_DEBIAN13=$(ls -1 /var/lib/vz/template/cache/debian-13-standard_*.tar.zst 2>/dev/null | sort -V | tail -1)
         if [[ -n "$LATEST_DEBIAN13" ]]; then
             TEMPLATE_NAME=$(basename "$LATEST_DEBIAN13")
-            TEMPLATE_STORAGE_DETECTED=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "local")
-            TEMPLATE="${TEMPLATE_STORAGE_DETECTED}:${TEMPLATE_NAME}"
+            TEMPLATE="local:${TEMPLATE_NAME}"
         else
             # Fallback to first available template
             FIRST_TEMPLATE=$(ls -1 /var/lib/vz/template/cache/*.tar.zst 2>/dev/null | head -1)
             if [[ -n "$FIRST_TEMPLATE" ]]; then
                 TEMPLATE_NAME=$(basename "$FIRST_TEMPLATE")
-                TEMPLATE_STORAGE_DETECTED=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "local")
-                TEMPLATE="${TEMPLATE_STORAGE_DETECTED}:${TEMPLATE_NAME}"
+                TEMPLATE="local:${TEMPLATE_NAME}"
             else
                 TEMPLATE="local:debian-12-standard_12.12-1_amd64.tar.zst"
             fi
@@ -251,8 +248,14 @@ if ! pveam list "$TEMPLATE_STORAGE_CHECK" 2>/dev/null | grep -q "$TEMPLATE_NAME_
     fi
     
     msg_info "Using available template: $AVAILABLE_TEMPLATE_NAMES"
-    TEMPLATE_STORAGE_DETECTED=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "local")
-    TEMPLATE="${TEMPLATE_STORAGE_DETECTED}:${AVAILABLE_TEMPLATE_NAMES}"
+    # Check if template is in local cache directory (always use "local" for those)
+    if [[ -f "/var/lib/vz/template/cache/${AVAILABLE_TEMPLATE_NAMES}" ]]; then
+        TEMPLATE="local:${AVAILABLE_TEMPLATE_NAMES}"
+    else
+        # Template not in local cache, try to find which storage has it
+        TEMPLATE_STORAGE_DETECTED=$(pvesm status -content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}' || echo "local")
+        TEMPLATE="${TEMPLATE_STORAGE_DETECTED}:${AVAILABLE_TEMPLATE_NAMES}"
+    fi
     msg_info "Template set to: $TEMPLATE"
 fi
 
