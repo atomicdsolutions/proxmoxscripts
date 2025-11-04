@@ -7,13 +7,13 @@
 function header_info {
   clear
   cat <<"EOF"
-   _____                              _        
-  / ____|                            | |       
- | (___  _   _  ___ ___ ___  ___ ___ | |_ __ _ 
+   _____                              _
+  / ____|                            | |
+ | (___  _   _  ___ ___ ___  ___ ___ | |_ __ _
   \___ \| | | |/ _ / __/ __|/ _ / __| __/ _` |
   ____) | |_| |  __\__ \__ \  __\__ | || (_| |
  |_____/ \__,_|\___|___/___/\___|___/\__\__,_|
-                                               
+
 EOF
 }
 
@@ -69,20 +69,18 @@ NAME="supabase"
 PASS="$(openssl rand -base64 8)"
 CTID=$(pvesh get /cluster/nextid)
 # Supabase requires more resources than Metabase
-PCT_OPTIONS="
-    -features keyctl=1,nesting=1
-    -hostname $NAME
-    -tags proxmox-helper-scripts
-    -onboot 1
-    -cores 4
-    -memory 4096
-    -swap 1024
-    -password $PASS
-    -net0 name=eth0,bridge=vmbr0,ip=dhcp
-    -unprivileged 0
-  "
 DEFAULT_PCT_OPTIONS=(
   -arch $(dpkg --print-architecture)
+  -features keyctl=1,nesting=1
+  -hostname $NAME
+  -tags proxmox-helper-scripts
+  -onboot 1
+  -cores 4
+  -memory 4096
+  -swap 1024
+  -password $PASS
+  -net0 name=eth0,bridge=vmbr0,ip=dhcp
+  -unprivileged 0
 )
 
 # Set the CONTENT and CONTENT_LABEL variables
@@ -170,7 +168,7 @@ if ! pveam list $TEMPLATE_STORAGE | grep -q "$TEMPLATE"; then
 fi
 
 # Create variable for 'pct' options
-PCT_OPTIONS=(${PCT_OPTIONS[@]:-${DEFAULT_PCT_OPTIONS[@]}})
+PCT_OPTIONS=("${DEFAULT_PCT_OPTIONS[@]}")
 [[ " ${PCT_OPTIONS[@]} " =~ " -rootfs " ]] || PCT_OPTIONS+=(-rootfs $CONTAINER_STORAGE:${PCT_DISK_SIZE:-32})
 
 # Create LXC
@@ -244,190 +242,88 @@ warn "Supabase CLI is optional and not required for docker compose deployment"
 msg "Creating Supabase project directory..."
 pct exec $CTID -- bash -c "mkdir -p /opt/supabase && cd /opt/supabase"
 
-# Create .env file with all required configuration
-msg "Creating Supabase configuration (.env)..."
-pct exec $CTID -- bash -c "cat > /opt/supabase/.env <<'ENVEOF'
-POSTGRES_PASSWORD=\${POSTGRES_PASSWORD}
-POSTGRES_HOST=db
-POSTGRES_DB=postgres
-POSTGRES_PORT=5432
-POSTGRES_USER=postgres
+# Install git if not available (needed for sparse checkout)
+msg "Installing git (if needed)..."
+pct exec $CTID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends git ca-certificates && apt-get clean && rm -rf /var/lib/apt/lists/*" || true
 
-# API Configuration
-API_URL=http://${IP}:8000
-GOTRUE_API_HOST=0.0.0.0
-GOTRUE_API_PORT=9999
-GOTRUE_API_EXTERNAL_URL=http://${IP}:8000
+# Get Supabase docker files using official method (git sparse checkout)
+msg "Downloading Supabase docker configuration using official method..."
+pct exec $CTID -- bash -c "
+  cd /tmp && \
+  rm -rf supabase-temp supabase-project-temp 2>/dev/null || true && \
+  git clone --filter=blob:none --no-checkout --depth=1 https://github.com/supabase/supabase.git supabase-temp && \
+  cd supabase-temp && \
+  git sparse-checkout set --cone docker && \
+  git checkout HEAD 2>/dev/null || git checkout master 2>/dev/null || git checkout main 2>/dev/null && \
+  cd /tmp && \
+  mkdir -p supabase-project-temp && \
+  cp -rf supabase-temp/docker/* supabase-project-temp/ && \
+  cp supabase-temp/docker/.env.example supabase-project-temp/.env 2>/dev/null || true && \
+  mv supabase-project-temp/* /opt/supabase/ && \
+  rm -rf /tmp/supabase-temp /tmp/supabase-project-temp 2>/dev/null || true
+" || {
+  warn "Git method failed, downloading docker-compose.yml directly..."
+  pct exec $CTID -- bash -c "curl -fsSL https://raw.githubusercontent.com/supabase/supabase/master/docker/docker-compose.yml -o /opt/supabase/docker-compose.yml"
+  pct exec $CTID -- bash -c "curl -fsSL https://raw.githubusercontent.com/supabase/supabase/master/docker/.env.example -o /opt/supabase/.env.example 2>/dev/null || true"
+}
 
-# JWT Configuration
-JWT_SECRET=\${JWT_SECRET}
-JWT_EXP=3600
-JWT_DEFAULT_GROUP_NAME=authenticated
-
-# GoTrue (Auth Service)
-GOTRUE_SITE_URL=http://${IP}:8000
-GOTRUE_URI_ALLOW_LIST=http://${IP}:8000
-GOTRUE_DISABLE_SIGNUP=false
-GOTRUE_JWT_SECRET=\${JWT_SECRET}
-GOTRUE_JWT_EXP=3600
-GOTRUE_JWT_DEFAULT_GROUP_NAME=authenticated
-GOTRUE_DB_DRIVER=postgres
-GOTRUE_DB_URI=postgres://supabase_auth_admin:\${POSTGRES_PASSWORD}@db:5432/postgres
-
-# PostgREST (API Service)
-PGRST_DB_URI=postgres://authenticator:\${POSTGRES_PASSWORD}@db:5432/postgres
-PGRST_DB_SCHEMAS=public,storage,graphql_public
-PGRST_DB_EXTRA_SEARCH_PATH=public,extensions
-PGRST_DB_ANON_ROLE=anon
-PGRST_JWT_SECRET=\${JWT_SECRET}
-
-# Storage Service
-STORAGE_BACKEND=file
-STORAGE_FILE_SIZE_LIMIT=52428800
-STORAGE_S3_BUCKET=supabase
-STORAGE_S3_REGION=us-east-1
-FILE_STORAGE_BACKEND_PATH=/var/lib/storage
-STORAGE_DB_URI=postgres://supabase_storage_admin:\${POSTGRES_PASSWORD}@db:5432/postgres
-
-# Realtime Service
-REALTIME_DB_HOST=db
-REALTIME_DB_PORT=5432
-REALTIME_DB_USER=supabase_realtime_admin
-REALTIME_DB_PASSWORD=\${POSTGRES_PASSWORD}
-REALTIME_DB_NAME=postgres
-REALTIME_DB_URI=postgres://supabase_realtime_admin:\${POSTGRES_PASSWORD}@db:5432/postgres
-
-# Studio (Dashboard)
-STUDIO_PORT=3000
-STUDIO_API_URL=http://${IP}:8000
-
-# Kong API Gateway
-KONG_DATABASE=off
-KONG_DECLARATIVE_CONFIG=/var/lib/kong/kong.yml
-KONG_DNS_ORDER=LAST,A,CNAME
-
-# Edge Functions
-ENABLE_EDGE_RUNTIME=true
-FUNCTIONS_PATH=/var/lib/supabase/functions
-
-# Database Extensions
-ENABLE_PGVECTOR=true
-
-# Additional required variables
-SECRET_KEY_BASE=\${SECRET_KEY_BASE}
-POOLER_DB_POOL_SIZE=20
-POOLER_DB_MAX_CLIENT_CONN=100
-POOLER_DEFAULT_POOL_SIZE=20
-POOLER_MAX_CLIENT_CONN=100
-POOLER_PROXY_PORT_TRANSACTION=5432
-POOLER_TENANT_ID=
-
-# API Keys (will be generated)
-ANON_KEY=\${ANON_KEY}
-SERVICE_ROLE_KEY=\${SERVICE_ROLE_KEY}
-
-# URLs
-SUPABASE_PUBLIC_URL=http://${IP}:8000
-API_EXTERNAL_URL=http://${IP}:8000
-SITE_URL=http://${IP}:8000
-
-# JWT
-JWT_EXPIRY=3600
-
-# Studio/Dashboard
-STUDIO_DEFAULT_ORGANIZATION=Default Organization
-STUDIO_DEFAULT_PROJECT=Default Project
-DASHBOARD_USERNAME=admin
-DASHBOARD_PASSWORD=\${DASHBOARD_PASSWORD}
-
-# Auth Configuration
-ENABLE_ANONYMOUS_USERS=true
-ENABLE_EMAIL_AUTOCONFIRM=false
-ENABLE_EMAIL_SIGNUP=true
-ENABLE_PHONE_SIGNUP=false
-ENABLE_PHONE_AUTOCONFIRM=false
-DISABLE_SIGNUP=false
-
-# SMTP (optional - leave empty for local dev)
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_USER=
-SMTP_PASS=
-SMTP_ADMIN_EMAIL=
-SMTP_SENDER_NAME=Supabase
-
-# Mailer URLs
-MAILER_URLPATHS_INVITE=/auth/v1/verify
-MAILER_URLPATHS_CONFIRMATION=/auth/v1/verify
-MAILER_URLPATHS_RECOVERY=/auth/v1/verify
-MAILER_URLPATHS_EMAIL_CHANGE=/auth/v1/verify
-ADDITIONAL_REDIRECT_URLS=
-
-# Storage/Image Proxy
-IMGPROXY_ENABLE_WEBP_DETECTION=false
-
-# Functions
-FUNCTIONS_VERIFY_JWT=true
-
-# Logging/Logflare (optional)
-LOGFLARE_PUBLIC_ACCESS_TOKEN=
-LOGFLARE_PRIVATE_ACCESS_TOKEN=
-
-# Database Meta
-PG_META_CRYPTO_KEY=\${PG_META_CRYPTO_KEY}
-
-# Docker
-DOCKER_SOCKET_LOCATION=/var/run/docker.sock
-
-# Vault
-VAULT_ENC_KEY=\${VAULT_ENC_KEY}
-
-# Kong
-KONG_HTTP_PORT=8000
-KONG_HTTPS_PORT=8443
-
-# Logging
-LOG_LEVEL=info
-ENVEOF"
-
-# Generate additional secrets
+# Generate additional secrets (before creating .env)
 SECRET_KEY_BASE="${SECRET_KEY_BASE:-$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)}"
 PG_META_CRYPTO_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 VAULT_ENC_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 DASHBOARD_PASSWORD=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
 
-# Set actual values in .env
-pct exec $CTID -- bash -c "cd /opt/supabase && \
-  sed -i \"s|\\\${POSTGRES_PASSWORD}|$DB_PASSWORD|g\" .env && \
-  sed -i \"s|\\\${JWT_SECRET}|$JWT_SECRET|g\" .env && \
-  sed -i \"s|\\\${SECRET_KEY_BASE}|$SECRET_KEY_BASE|g\" .env && \
-  sed -i \"s|\\\${ANON_KEY}|$ANON_KEY|g\" .env && \
-  sed -i \"s|\\\${SERVICE_ROLE_KEY}|$SERVICE_ROLE_KEY|g\" .env && \
-  sed -i \"s|\\\${PG_META_CRYPTO_KEY}|$PG_META_CRYPTO_KEY|g\" .env && \
-  sed -i \"s|\\\${VAULT_ENC_KEY}|$VAULT_ENC_KEY|g\" .env && \
-  sed -i \"s|\\\${DASHBOARD_PASSWORD}|$DASHBOARD_PASSWORD|g\" .env"
+# Fix docker socket volume issues in official compose file
+msg "Fixing docker socket volume mounts for LXC compatibility..."
+pct exec $CTID -- bash -c "
+  cd /opt/supabase && \
+  # Remove lines with broken triple docker.sock patterns
+  sed -i '/\/var\/run\/docker.sock:\/var\/run\/docker.sock:\/var\/run\/docker.sock/d' docker-compose.yml 2>/dev/null || true && \
+  # Remove lines starting with :/var/run/docker.sock (invalid leading colon)
+  sed -i '/^[[:space:]]*-[[:space:]]*:\/var\/run\/docker.sock/d' docker-compose.yml 2>/dev/null || true && \
+  # Remove all docker socket volumes (not needed in LXC)
+  sed -i '/docker.sock/d' docker-compose.yml 2>/dev/null || true
+"
 
-# Supabase CLI is optional - we'll use docker compose directly
-# The CLI would be useful for local dev, but for production we use docker-compose
-msg "Preparing Supabase configuration..."
-
-# If Supabase CLI didn't work, try using official docker-compose.yml
-if ! pct exec $CTID -- test -f /opt/supabase/docker-compose.yml; then
-  msg "Downloading official Supabase docker-compose.yml..."
-  pct exec $CTID -- bash -c "curl -fsSL https://raw.githubusercontent.com/supabase/supabase/master/docker/docker-compose.yml -o /opt/supabase/docker-compose.yml"
-  # Fix docker socket volume issue in official compose file
-  pct exec $CTID -- bash -c "sed -i 's|/var/run/docker.sock:ro,z|/var/run/docker.sock:/var/run/docker.sock:ro|g' /opt/supabase/docker-compose.yml || true"
+# Create .env file - use .env.example as base if available, otherwise create from scratch
+msg "Creating Supabase configuration (.env)..."
+if pct exec $CTID -- test -f /opt/supabase/.env.example; then
+  msg "Using .env.example as base and updating with generated values..."
+  pct exec $CTID -- bash -c "cp /opt/supabase/.env.example /opt/supabase/.env"
+else
+  msg "Creating .env from scratch (no .env.example found)..."
+  pct exec $CTID -- bash -c "touch /opt/supabase/.env"
 fi
+
+# Update .env with actual values (works for both .env.example and custom .env)
+msg "Updating .env with generated passwords and configuration..."
+pct exec $CTID -- bash -c "cd /opt/supabase && \
+  # Set or update required variables (handle both existing and new, skip commented lines)
+  (grep -q '^[[:space:]]*POSTGRES_PASSWORD=' .env && sed -i \"s|^[[:space:]]*POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$DB_PASSWORD|\" .env) || echo \"POSTGRES_PASSWORD=$DB_PASSWORD\" >> .env && \
+  (grep -q '^[[:space:]]*JWT_SECRET=' .env && sed -i \"s|^[[:space:]]*JWT_SECRET=.*|JWT_SECRET=$JWT_SECRET|\" .env) || echo \"JWT_SECRET=$JWT_SECRET\" >> .env && \
+  (grep -q '^[[:space:]]*SECRET_KEY_BASE=' .env && sed -i \"s|^[[:space:]]*SECRET_KEY_BASE=.*|SECRET_KEY_BASE=$SECRET_KEY_BASE|\" .env) || echo \"SECRET_KEY_BASE=$SECRET_KEY_BASE\" >> .env && \
+  (grep -q '^[[:space:]]*ANON_KEY=' .env && sed -i \"s|^[[:space:]]*ANON_KEY=.*|ANON_KEY=$ANON_KEY|\" .env) || echo \"ANON_KEY=$ANON_KEY\" >> .env && \
+  (grep -q '^[[:space:]]*SERVICE_ROLE_KEY=' .env && sed -i \"s|^[[:space:]]*SERVICE_ROLE_KEY=.*|SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY|\" .env) || echo \"SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY\" >> .env && \
+  (grep -q '^[[:space:]]*PG_META_CRYPTO_KEY=' .env && sed -i \"s|^[[:space:]]*PG_META_CRYPTO_KEY=.*|PG_META_CRYPTO_KEY=$PG_META_CRYPTO_KEY|\" .env) || echo \"PG_META_CRYPTO_KEY=$PG_META_CRYPTO_KEY\" >> .env && \
+  (grep -q '^[[:space:]]*VAULT_ENC_KEY=' .env && sed -i \"s|^[[:space:]]*VAULT_ENC_KEY=.*|VAULT_ENC_KEY=$VAULT_ENC_KEY|\" .env) || echo \"VAULT_ENC_KEY=$VAULT_ENC_KEY\" >> .env && \
+  (grep -q '^[[:space:]]*DASHBOARD_PASSWORD=' .env && sed -i \"s|^[[:space:]]*DASHBOARD_PASSWORD=.*|DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD|\" .env) || echo \"DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD\" >> .env && \
+  # Update URLs with container IP (only if IP is valid)
+  [ \"$IP\" != \"NOT FOUND\" ] && { \
+    sed -i \"s|^[[:space:]]*API_URL=.*|API_URL=http://${IP}:8000|\" .env 2>/dev/null || echo \"API_URL=http://${IP}:8000\" >> .env; \
+    sed -i \"s|^[[:space:]]*SUPABASE_PUBLIC_URL=.*|SUPABASE_PUBLIC_URL=http://${IP}:8000|\" .env 2>/dev/null || echo \"SUPABASE_PUBLIC_URL=http://${IP}:8000\" >> .env; \
+    sed -i \"s|^[[:space:]]*API_EXTERNAL_URL=.*|API_EXTERNAL_URL=http://${IP}:8000|\" .env 2>/dev/null || echo \"API_EXTERNAL_URL=http://${IP}:8000\" >> .env; \
+    sed -i \"s|^[[:space:]]*SITE_URL=.*|SITE_URL=http://${IP}:8000|\" .env 2>/dev/null || echo \"SITE_URL=http://${IP}:8000\" >> .env; \
+  } || true"
 
 # Create a backup docker-compose.yml if the official one has issues
 if ! pct exec $CTID -- test -f /opt/supabase/docker-compose.yml; then
   msg "Creating docker-compose.yml..."
-  pct exec $CTID -- bash -c "cat > /opt/supabase/docker-compose.yml <<'COMPOSEEOF'
+  pct exec $CTID -- bash -c "cat > /opt/supabase/docker-compose.yml <<COMPOSEEOF
 version: '3.8'
 
 services:
   db:
-    container_name: supabase_db_${CTID}
+    container_name: supabase_db_$CTID
     image: supabase/postgres:latest
     restart: unless-stopped
     ports:
@@ -445,7 +341,7 @@ services:
       retries: 10
 
   studio:
-    container_name: supabase_studio_${CTID}
+    container_name: supabase_studio_$CTID
     image: supabase/studio:latest
     restart: unless-stopped
     ports:
@@ -461,7 +357,7 @@ services:
       - meta
 
   kong:
-    container_name: supabase_kong_${CTID}
+    container_name: supabase_kong_$CTID
     image: kong:latest
     restart: unless-stopped
     ports:
@@ -481,7 +377,7 @@ services:
       - realtime
 
   auth:
-    container_name: supabase_auth_${CTID}
+    container_name: supabase_auth_$CTID
     image: supabase/gotrue:latest
     restart: unless-stopped
     environment:
@@ -505,7 +401,7 @@ services:
       retries: 10
 
   rest:
-    container_name: supabase_rest_${CTID}
+    container_name: supabase_rest_$CTID
     image: postgrest/postgrest:latest
     restart: unless-stopped
     environment:
@@ -523,7 +419,7 @@ services:
       retries: 10
 
   storage:
-    container_name: supabase_storage_${CTID}
+    container_name: supabase_storage_$CTID
     image: supabase/storage-api:latest
     restart: unless-stopped
     ports:
@@ -546,7 +442,7 @@ services:
         condition: service_healthy
 
   realtime:
-    container_name: supabase_realtime_${CTID}
+    container_name: supabase_realtime_$CTID
     image: supabase/realtime:latest
     restart: unless-stopped
     environment:
@@ -564,7 +460,7 @@ services:
         condition: service_healthy
 
   meta:
-    container_name: supabase_meta_${CTID}
+    container_name: supabase_meta_$CTID
     image: supabase/postgres-meta:latest
     restart: unless-stopped
     environment:
@@ -576,7 +472,7 @@ services:
       PG_META_DB_PASSWORD: \${POSTGRES_PASSWORD}
 
   functions:
-    container_name: supabase_functions_${CTID}
+    container_name: supabase_functions_$CTID
     image: supabase/edge-runtime:latest
     restart: unless-stopped
     ports:
@@ -593,7 +489,7 @@ services:
         condition: service_healthy
 
   vector:
-    container_name: supabase_vector_${CTID}
+    container_name: supabase_vector_$CTID
     image: supabase/postgres:latest
     restart: unless-stopped
     command: >
@@ -625,7 +521,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-COMPOSEEOF"
+COMPOSEEOF
+"
+fi
 
 # Verify volumes directory exists
 msg "Verifying volumes directory..."
